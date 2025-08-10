@@ -1,0 +1,8 @@
+{
+    "julia.executablePath": "/home/user/Apps/julia-1.11.6/bin/julia",
+    // "julia.additionalArgs": [
+    //     "--sysimage=JuliaSysimage.so"
+    // ],
+    "editor.wordWrap": "on",
+    "julia.environmentPath": "/mnt/storage/molecular-dynamics",
+}
