@@ -2,7 +2,9 @@ using Unitful
 using StaticArrays
 using ForwardDiff
 using LinearAlgebra
+using Tullio
 using GLMakie
+using CUDA, KernelAbstractions, Zygote
 GLMakie.activate!()
 
 mutable struct Particle
@@ -15,17 +17,12 @@ begin
     # Periodic boundary conditions - box dimensions
     BOX_SIZE = 10u"nm"
     MASS_ARGON = 39.948u"u"
-    function offset(particleA::Particle, particleB::Particle)
-        # Calculate distance vector with periodic boundary conditions
-        dr = particleA.position - particleB.position
-
-        # Apply minimum image convention for each dimension
+    function offset_bc(posA::AbstractVector, posB::AbstractVector)
+        dr = posA - posB
         dr = dr .- BOX_SIZE .* round.(dr ./ BOX_SIZE)
-
         return dr
     end
-
-
+    offset(particleA::Particle, particleB::Particle) = offset_bc(particleA.position, particleB.position)
 
     # Create a 3D grid with spacing of 1 angstrom (1u"Å")
     function create_3d_grid(xmin, xmax, ymin, ymax, zmin, zmax)
@@ -107,21 +104,17 @@ begin
         -ForwardDiff.gradient(lennard_jones, ustrip.(u"nm", displacement)) .* u"kJ/(mol*nm)"
     end
 
-
-    forces = [zero(typeof(lennard_jones_force(particles[1], particles[2]))) for p in particles]
-    for i in 1:lastindex(particles)
-        for j in 1:lastindex(particles)
-            if i != j
-                forces[i] += lennard_jones_force(particles[i], particles[j])
-            end
+    @tullio forces[i] := begin
+        if i != j
+            lennard_jones_force(particles[i], particles[j])
+        else
+            zero(typeof(lennard_jones_force(particles[1], particles[2])))
         end
     end
 
-    forces[1] / particles[1].mass
-    (0.5 .* (forces[1]/particles[1].mass).*(0.01u"ps") .^ 2)[1]
-
-
     function verlet_step!(particles, forces, dt)
+        particle_positions = cu((x -> x.position).(particles))
+
         # Velocity-Verlet algorithm
         # Step 1: Update positions using current velocities and forces
         for i in eachindex(particles)
@@ -134,14 +127,13 @@ begin
         end
 
         # Step 2: Calculate new forces at updated positions
-        new_forces = [zero(typeof(forces[1])) for _ in particles]
-        Threads.@threads for i in 1:lastindex(particles)
-            for j in 1:lastindex(particles)
-                if i != j
-                    new_forces[i] += lennard_jones_force(particles[i], particles[j])
-                end
-            end
+        @tullio new_forces[i] := begin
+            dr = particle_positions[i] - particle_positions[j]
+            dr = dr .- BOX_SIZE_cu[i] .* round.(dr ./ BOX_SIZE_cu[i])
+            r = -ForwardDiff.gradient(lennard_jones, ustrip.(u"nm", dr)) .* u"kJ/(mol*nm)"
+            i != j ? r : zero(r)
         end
+        new_forces = new_forces |> collect
 
         # Step 3: Update velocities using average of old and new forces
         for i in eachindex(particles)
@@ -151,10 +143,22 @@ begin
             average_acceleration = ustrip.(u"kJ *nm^-1 *mol^-1 *u^-1", average_acceleration) * u"nm/ps^2"
             particles[i].velocity += average_acceleration .* dt
         end
-
         forces .= new_forces
-    end
 
+
+        @tullio kinetic_energy := 0.5 * particles[i].mass * sum(abs2, particles[i].velocity) # in nm^2 u ps^-2
+        kinetic_energy = kinetic_energy.val * 1.66053906660e-21 # in kJ/mol
+        @tullio potential_energy[i] := begin
+            dr = particle_positions[i] - particle_positions[j]
+            dr = dr .- BOX_SIZE_cu[i] .* round.(dr ./ BOX_SIZE_cu[i])
+            r = lennard_jones(ustrip.(u"nm", dr)) * u"kJ/mol"
+            i != j ? r : zero(r)
+        end
+        potential_energy = potential_energy |> collect |> sum
+        Na = 6.02214076e23  # Avogadro's number (mol⁻¹)
+        potential_energy = potential_energy.val * 1000 / Na
+        return potential_energy, kinetic_energy
+    end
 
     let
         fig = Figure()
@@ -214,31 +218,19 @@ begin
 
         global traj
         traj = []
+        prev_ts = time()
         while true
-            Na = 6.02214076e23  # Avogadro's number (mol⁻¹)
+            
             # positions[] .= reduce(hcat, [[uconvert(u"Å", x).val for x in particle.position] for particle in particles])
             # notify(positions)
-            sleep(0.001)
-            verlet_step!(particles, forces, 1.0u"fs")
-
-            kn = sum(0.5 * particles[1].mass * sum(abs2, particle.velocity) for particle in particles) # in nm^2 u ps^-2
-            kn_J = kn.val * 1.66053906660e-21
-            pn = let
-                pn_each = zeros(typeof(lennard_jones(offset(particles[1], particles[2]))), length(particles))
-                Threads.@threads for i in 1:lastindex(particles)
-                    for j in 1:lastindex(particles)
-                        if i != j
-                            pn_each[i] += lennard_jones(offset(particles[i], particles[j]))
-                        end
-                    end
-                end
-                sum(pn_each)
-            end
-                
-            pn_kJmol = pn.val * 1000 / Na
+            # sleep(0.001)
+            pn_J, kn_J = verlet_step!(particles, forces, 1.0u"fs")
+            println("pn_J: ", pn_J, " kn_J: ", kn_J)
+            println("time: $(time() - prev_ts)")
+            prev_ts = time()
 
             push!(kinetic_energy[], kn_J)
-            push!(potential_energy[], pn_kJmol)
+            push!(potential_energy[], pn_J)
             push!(total_energy[], kinetic_energy[][end] + potential_energy[][end])
             notify(kinetic_energy)
             notify(potential_energy)
@@ -247,23 +239,4 @@ begin
             push!(traj, positions[] |> collect)
         end
     end
-end
-
-Na = 6.02214076e23
-x = Na * 1.0e-3 * (sum(0.5 * particles[1].mass * sum(abs2, particle.velocity) for particle in particles))
-y = sum(lennard_jones(offset(particles[i], particles[j])) for i in 1:lastindex(particles) for j in 1:lastindex(particles) if i != j)
-lennard_jones(offset(particles[1], particles[2]))
-x_kJmol = uconvert(u"kJ/mol", x)
-Na = 6.02214076e23
-y * 1000 / Na
-
-sum(lennard_jones(offset(particles[i], particles[j])).val for i in 1:lastindex(particles) for j in 1:lastindex(particles) if i != j)
-
-let
-    fig = Figure()
-    ax = Axis(fig[1, 1], xlabel="Frame", ylabel="x position (Å)", title="X Positions of 1st and 2nd Particle")
-    lines!(ax, (x -> x[1, 1]).(traj), label="Particle 1")
-    lines!(ax, (x -> x[1, 2]).(traj), label="Particle 2")
-    axislegend(ax)
-    display(fig)
 end
