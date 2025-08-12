@@ -4,5 +4,4 @@
     //     "--sysimage=JuliaSysimage.so"
     // ],
     "editor.wordWrap": "on",
-    "julia.environmentPath": "/mnt/storage/molecular-dynamics",
 }

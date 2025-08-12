@@ -135,7 +135,7 @@ begin
 
         # Step 2: Calculate new forces at updated positions
         new_forces = [zero(typeof(forces[1])) for _ in particles]
-        for i in 1:lastindex(particles)
+        Threads.@threads for i in 1:lastindex(particles)
             for j in 1:lastindex(particles)
                 if i != j
                     new_forces[i] += lennard_jones_force(particles[i], particles[j])
@@ -223,7 +223,18 @@ begin
 
             kn = sum(0.5 * particles[1].mass * sum(abs2, particle.velocity) for particle in particles) # in nm^2 u ps^-2
             kn_J = kn.val * 1.66053906660e-21
-            pn = sum(lennard_jones(offset(particles[i], particles[j])) for i in 1:lastindex(particles) for j in 1:lastindex(particles) if i != j)
+            pn = let
+                pn_each = zeros(typeof(lennard_jones(offset(particles[1], particles[2]))), length(particles))
+                Threads.@threads for i in 1:lastindex(particles)
+                    for j in 1:lastindex(particles)
+                        if i != j
+                            pn_each[i] += lennard_jones(offset(particles[i], particles[j]))
+                        end
+                    end
+                end
+                sum(pn_each)
+            end
+                
             pn_kJmol = pn.val * 1000 / Na
 
             push!(kinetic_energy[], kn_J)
