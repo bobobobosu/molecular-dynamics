@@ -225,8 +225,15 @@ begin
             positions[] .= reduce(hcat, [[uconvert(u"Å", x).val for x in particle.position] for particle in particles])
             notify(positions)
             # sleep(0.001)
-            pn_J, kn_J = verlet_step!(particles, forces, 1.0u"fs")
-            prev_ts = time()
+            dt = 1.0u"fs"
+            pn_J, kn_J = verlet_step!(particles, forces, dt)
+
+            elapsed_hours = (time() - prev_ts) / 3600
+            sim_per_hr_ps = elapsed_hours > 0 ? (length(traj) / 1000) / elapsed_hours : 0.0
+            if sim_per_hr_ps > 0
+                @info "Simulated $(sim_per_hr_ps) ps/hr"
+            end
+
 
             push!(kinetic_energy[], kn_J)
             push!(potential_energy[], pn_J)
