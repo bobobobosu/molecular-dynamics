@@ -55,6 +55,7 @@ begin
 
         push!(particles, Particle(position, velocity, mass))
     end
+    BOX_SIZE_cu = repeat([BOX_SIZE], length(particles))
 
     # Remove the mean momentum from the particles
     begin
@@ -113,7 +114,7 @@ begin
     end
 
     function verlet_step!(particles, forces, dt)
-        particle_positions = cu((x -> x.position).(particles))
+        particle_positions = ((x -> x.position).(particles))
 
         # Velocity-Verlet algorithm
         # Step 1: Update positions using current velocities and forces
@@ -221,12 +222,10 @@ begin
         prev_ts = time()
         while true
             
-            # positions[] .= reduce(hcat, [[uconvert(u"Å", x).val for x in particle.position] for particle in particles])
-            # notify(positions)
+            positions[] .= reduce(hcat, [[uconvert(u"Å", x).val for x in particle.position] for particle in particles])
+            notify(positions)
             # sleep(0.001)
             pn_J, kn_J = verlet_step!(particles, forces, 1.0u"fs")
-            println("pn_J: ", pn_J, " kn_J: ", kn_J)
-            println("time: $(time() - prev_ts)")
             prev_ts = time()
 
             push!(kinetic_energy[], kn_J)
@@ -240,3 +239,6 @@ begin
         end
     end
 end
+
+using Serialization
+serialize("traj_gpu.jls", Dict("traj" => traj))
