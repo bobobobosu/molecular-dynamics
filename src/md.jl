@@ -222,8 +222,11 @@ begin
         prev_ts = time()
         while true
             
-            positions[] .= reduce(hcat, [[uconvert(u"Å", x).val for x in particle.position] for particle in particles])
-            notify(positions)
+            if time() - prev_ts > 1.0
+                positions[] .= reduce(hcat, [[uconvert(u"Å", x).val for x in particle.position] for particle in particles])
+                notify(positions)
+                prev_ts = time()
+            end
             # sleep(0.001)
             dt = 1.0u"fs"
             pn_J, kn_J = verlet_step!(particles, forces, dt)
