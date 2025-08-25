@@ -114,8 +114,6 @@ begin
     end
 
     function verlet_step!(particles, forces, dt)
-        particle_positions = ((x -> x.position).(particles))
-
         # Velocity-Verlet algorithm
         # Step 1: Update positions using current velocities and forces
         for i in eachindex(particles)
@@ -126,6 +124,7 @@ begin
             # Apply periodic boundary conditions
             particles[i].position = mod.(particles[i].position, BOX_SIZE)
         end
+        particle_positions = ((x -> x.position).(particles))
 
         # Step 2: Calculate new forces at updated positions
         @tullio new_forces[i] := begin
@@ -155,7 +154,7 @@ begin
             r = lennard_jones(ustrip.(u"nm", dr)) * u"kJ/mol"
             i != j ? r : zero(r)
         end
-        potential_energy = potential_energy |> collect |> sum
+        potential_energy = (potential_energy |> collect |> sum) / 2 # divide by 2 because we counted each pair twice
         Na = 6.02214076e23  # Avogadro's number (mol⁻¹)
         potential_energy = potential_energy.val * 1000 / Na
         return potential_energy, kinetic_energy
@@ -245,10 +244,10 @@ begin
             notify(potential_energy)
             notify(total_energy)
             autolimits!(ax2)
-            push!(traj, positions[] |> collect)
+            # push!(traj, positions[sssssssssssss] |> collect)
         end
     end
 end
-
+ssssssssss
 using Serialization
 serialize("traj_gpu.jls", Dict("traj" => traj))
