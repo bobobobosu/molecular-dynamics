@@ -136,37 +136,13 @@ begin
         end
         new_forces = new_forces |> collect
 
-        # Step 3: Update dt/2 velocities using average of old and new forces
+        # Step 3: Update velocities using average of old and new forces
         for i in eachindex(particles)
             old_acceleration = forces[i] / particles[i].mass
             new_acceleration = new_forces[i] / particles[i].mass
             average_acceleration = (old_acceleration + new_acceleration) / 2
             average_acceleration = ustrip.(u"kJ *nm^-1 *mol^-1 *u^-1", average_acceleration) * u"nm/ps^2"
-            particles[i].velocity += average_acceleration .* (dt / 2)
-        end
-
-        # Step 4: Update dt/2 velocities using Andersen thermostat
-        collision_frequency = 2.0u"ps^-1"
-        @tullio kinetic_energy := 0.5 * particles[i].mass * sum(abs2, particles[i].velocity) # in nm^2 u ps^-2
-        println(kinetic_energy)
-        println(any(isnan, [v.velocity for v in particles] |> Iterators.flatten |> collect))
-        mean_temperature = kinetic_energy / ((3 / 2) * length(particles) * boltzmann_constant)
-        # println(mean_temperature)
-        for i in eachindex(particles)
-            if rand() < collision_frequency * dt
-                T = ustrip(u"K * nm^2 * u * J^-1 * ps^-2", mean_temperature)
-                particles[i].velocity = SVector{3,typeof(1.0u"nm/ps")}(([rand(Distributions.Normal(0, sqrt(T))) for _ in 1:3] .* u"nm/ps")...)
-                if any(isnan, particles[i].velocity)
-                    println(particles[i].velocity)
-                end
-                
-            else
-                old_acceleration = forces[i] / particles[i].mass
-                new_acceleration = new_forces[i] / particles[i].mass
-                average_acceleration = (old_acceleration + new_acceleration) / 2
-                average_acceleration = ustrip.(u"kJ *nm^-1 *mol^-1 *u^-1", average_acceleration) * u"nm/ps^2"
-                particles[i].velocity += average_acceleration .* (dt / 2)
-            end
+            particles[i].velocity += average_acceleration .* dt
         end
         forces .= new_forces
 

@@ -217,3 +217,5 @@ let
     scatter!(ax, pos[1, :], pos[2, :], markersize=20, color=:orange)
     display(f)
 end
+
+using Turing
