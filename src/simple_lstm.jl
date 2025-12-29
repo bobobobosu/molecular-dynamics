@@ -7,20 +7,12 @@ using Optimisers
 using Zygote
 using OneHotArrays
 using Lux.Training: TrainState, single_train_step!, AutoZygote
+using LuxCUDA
 
-
-    # model = Lux.Chain(
-    #     x -> reshape(x, size(x, 1), size(x, 2), size(x, 3), :),
-    #     Conv((3, 3), 3 => 16, relu; pad=1),
-    #     FlattenLayer(),
-    #     Dense(prod(dims[1:2]) * 16, 64, relu),
-    #     x -> reshape(x, size(x, 1), :, B),
-    #     Lux.Recurrence(LSTMCell(64 => 32)),
-    # )
-
+device(x) = CUDA.functional() ? cu(x) : x
 
 function build_simple_lstm(batch_size; nclasses::Integer=10, rng=Random.default_rng())
-    dims = (262, 1400, 3)
+    dims = (31, 350, 3)
     model = Lux.Chain(
         x -> reshape(x, size(x, 1), size(x, 2), size(x, 3), :),
         Conv((3, 3), 3 => 16, relu; pad=1),
@@ -34,12 +26,11 @@ function build_simple_lstm(batch_size; nclasses::Integer=10, rng=Random.default_
         Dense(32, nclasses),
     )
     ps, st = Lux.setup(rng, model)
-    return model, ps, st
+    return model, device(ps), device(st)
 end
 
-
 function predict_logits(model, ps, st, x)
-    y, _ = Lux.apply(model, x, ps, st)
+    y, _ = Lux.apply(model, device(x), device(ps), device(st))
     return y
 end
 
@@ -55,17 +46,6 @@ probs = logsoftmax(logits; dims=1)     # convert logits to log-probabilities
 class = argmax(probs; dims=1)  # Get the predicted class for each image
 
 
-###
-conv1: 
-maxpool1: (262, (1400-2)/2+1, 16, 15) --> (262, 700, 16, 15)
-conv2
-
-
-
-
-
-
-
 function train_on_all_orders(; epochs::Integer=200, batchsize::Integer=8, lr=1f-3, rng=MersenneTwister(0))
     @assert !isempty(dataset_all_img) "dataset_all_img is empty"
     @assert length(dataset_all_img) == length(dataset_all_order) "inputs and labels differ in length"
@@ -76,16 +56,32 @@ function train_on_all_orders(; epochs::Integer=200, batchsize::Integer=8, lr=1f-
     bce = BinaryCrossEntropyLoss(; logits=true)
     function batch_loss(model, ps, st, (x, y))
         logits, st = Lux.apply(model, x, ps, st)
-        loss = sum(bce(logits, onehotbatch(y, 1:nclasses))) / length(y)
+        loss = sum(bce(logits, device(onehotbatch(y, 1:nclasses)))) / length(y)
         return loss, st, logits
     end
 
     
     max_seq_len = maximum(lastindex.(dataset_all_img))
+    dataset_all_img_by_len = Dict(
+        seq_len => begin
+            idxs = filter(x -> 
+            lastindex(dataset_all_img[x]) == seq_len, collect(eachindex(dataset_all_img)))
+            device(Float32.(cat([cat(dataset_all_img[i]...; dims=4) for i in idxs]...; dims=5)))
+        end
+        for seq_len in 1:max_seq_len
+    )
+    dataset_all_order_by_len = Dict(
+        seq_len => begin
+            idxs = filter(x -> 
+            lastindex(dataset_all_img[x]) == seq_len, collect(eachindex(dataset_all_img)))
+            device([dataset_all_order[i] for i in idxs])
+        end
+        for seq_len in 1:max_seq_len
+    )
+    
     for epoch in 1:epochs
         for seq_len in 1:max_seq_len
-            idxs = filter(x -> 
-                lastindex(dataset_all_img[x]) == seq_len, collect(eachindex(dataset_all_img)))
+            idxs = collect(1:lastindex(dataset_all_img_by_len[seq_len], 5))
             shuffle!(rng, idxs)
             epoch_loss = 0f0
             correct = 0
@@ -94,16 +90,19 @@ function train_on_all_orders(; epochs::Integer=200, batchsize::Integer=8, lr=1f-
                 if length(batch) < batchsize
                     continue
                 end
-                x = Float32.(cat([cat(dataset_all_img[i]...; dims=4) for i in batch]...; dims=5))
-                y = [dataset_all_order[i] for i in batch]
+                x = dataset_all_img_by_len[seq_len][:, :, :, :, batch]
+                y = dataset_all_order_by_len[seq_len][batch]
 
                 _, loss, _, tstate = single_train_step!(AutoZygote(), batch_loss, (x, y), tstate)
 
-                epoch_loss += Float32(loss) * length(y)
+
+                y_cpu = Array(y)
+                epoch_loss += Float32(loss) * length(y_cpu)
                 logits, _ = Lux.apply(model, x, tstate.parameters, tstate.states)
-                preds = [argmax(@view logits[:, j]) for j in 1:size(logits, 2)]
-                correct += sum(preds .== y)
-                seen += length(y)
+                logits_cpu = Array(logits)  # argmax on CPU avoids scalar GPU indexing
+                preds = [argmax(@view logits_cpu[:, j]) for j in 1:size(logits_cpu, 2)]
+                correct += sum(preds .== y_cpu)
+                seen += length(y_cpu)
             end
             println("epoch $epoch | loss=$(epoch_loss / seen) | acc=$(correct / seen)")
         end
@@ -111,17 +110,16 @@ function train_on_all_orders(; epochs::Integer=200, batchsize::Integer=8, lr=1f-
     return tstate
 end
 
+
+let 
+    seq_len = 2
+    idxs = filter(x -> 
+    lastindex(dataset_all_img[x]) == seq_len, collect(eachindex(dataset_all_img)))
+    device([dataset_all_order[i] for i in idxs])
+end
+
 tstate = train_on_all_orders()
 
-[dataset_all_img[2], dataset_all_img[4]]
-(H,W, C, S, B)
-
-dataset_all_img[2] -> (H,W, C,S)
-cat(dataset_all_img[2]...; dims=4) #(H,W, C,S)
-
-cat([cat(i...; dims=4) for i in [dataset_all_img[2], dataset_all_img[4]]]...; dims=5)
-
-size(dataset_all_img[2][1])
 
 
 let
@@ -166,12 +164,12 @@ demo_lstmcell()
 
 
 
-rgb_to_tensor(x) = permutedims(channelview(x) ./ 255.0, (2, 3, 1))
+rgb_to_tensor(x) = permutedims(channelview(x[140:4:end, 1:4:end]) ./ 255.0, (2, 3, 1))
 dataset_all_img = [[rgb_to_tensor.(i[1][1:j]) for j in 1:lastindex(i[2])] for i in dataset] |> Iterators.flatten |> collect
 dataset_all_order = [i[2] for i in dataset] |> Iterators.flatten |> collect
 
 # Vector{Array{H, W, S, C}}
-dataset_all_img[2]
+dataset_all_img[2][1]
 
 lastindex.(dataset_all_img)
 
